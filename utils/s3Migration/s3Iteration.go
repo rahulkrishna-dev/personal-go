@@ -14,12 +14,39 @@ import (
 )
 
 const (
-	bucketName          = "seller-hub"
-	awsRegion           = "ap-southeast-1"
+	bucketName          = "blinkit-seller-stage"
+	awsRegion           = "us-west-2"
 	maxKeysPerIteration = 20
 )
 
 var commonDocumentRootFolders = []string{"iocc", "ownership_documents", "terms_and_condition", "search_insights"}
+
+var documentTypeMap = map[string]string{
+	"iocc":                "IOCC",
+	"ownership_documents": "OWNERSHIP",
+	"terms_and_condition": "T_AND_C",
+	"search_insights":     "SEARCH_INSIGHTS",
+	"sto_zips":            "STO",
+	"payout":              "PAYOUT",
+	"GST":                 "GST",
+	"PAN":                 "PAN",
+	"FSSAI":               "FSSAI",
+	"Brand_Authorization": "Brand_Authorization",
+	"Brand_Trademark":     "Brand_Trademark",
+	"Brand_Logo":          "Brand_Logo",
+	"ARN_Certificate":     "ARN_Certificate",
+	"Digital_Signature":   "Digital_Signature",
+	"CIN":                 "CIN",
+	"MSME":                "MSME",
+	"Cancelled_Cheque":    "Cancelled_Cheque",
+	"noc":                 "NOC",
+	"serviceability":      "SERVICEABILITY",
+	"soa":                 "SOA",
+	"availability":        "AVAILABILITY",
+	"daily-ageing":        "DAILY_AGEING",
+	"movement_invoice":    "MOVEMENT_INVOICE",
+	"sales-performance":   "SALES_PERFORMANCE",
+}
 
 var logger *zap.Logger
 
@@ -36,6 +63,7 @@ func init() {
 func IterateS3Keys() {
 	args := os.Args
 	prefix := args[0]
+	prefix = "search_insights/"
 
 	cfg, err := config.LoadDefaultConfig(context.TODO(), config.WithRegion(awsRegion))
 	if err != nil {
@@ -105,6 +133,10 @@ func processKeys(keyList []string) error {
 
 func buildPayloadFromKey(key string) *Document {
 	parts := strings.Split(key, "/")
+	if len(parts) < 1 {
+		logger.Error("Key split resulted in empty parts", zap.String("key", key))
+		return nil
+	}
 	rootFolder := parts[0]
 	var userIdStr, sellerIdStr *string
 	doc := Document{
@@ -116,33 +148,59 @@ func buildPayloadFromKey(key string) *Document {
 	}
 
 	if contains(commonDocumentRootFolders, rootFolder) {
-		doc.DocumentType = "COMMON"
+		doc.DocumentType = documentTypeMap[rootFolder]
 		return &doc
 	}
 
 	switch rootFolder {
 	case "sto_zips":
-		doc.DocumentType = "INVENTORY"
+		if len(parts) < 2 { //done
+			logger.Error("sto_zips key missing sellerId", zap.String("key", key))
+			return nil
+		}
+		doc.DocumentType = documentTypeMap[rootFolder]
 		sellerIdStr = &parts[1]
 	case "seller":
-		doc.DocumentType = parts[3]
-		userIdStr = &parts[1]
-	}
-	if rootFolder == "sto_zips" {
-		doc.DocumentType = "INVENTORY"
-		sellerIdStr = &parts[1]
-	}
-
-	if rootFolder == "seller" {
-		doc.DocumentType = parts[3]
-		if doc.DocumentType == "active_sellers" {
-			doc.DocumentType = "COMMON"
+		if len(parts) < 4 {
+			logger.Error("seller key missing expected indices", zap.String("key", key))
+			return nil
 		}
+		docType := parts[3]
+		if transformedDocType, ok := documentTypeMap[docType]; ok {
+			docType = transformedDocType
+		}
+		if docType == "active_sellers" {
+			docType = "INTERNAL_DASHBOARD"
+		}
+		if docType == "inventory" {
+			if len(parts) == 7 && parts[6] == "InventoryData.xlsx" {
+				docType = "SOH_SHEET"
+			}
+			if len(parts) == 6 && strings.HasPrefix(parts[5], "SELLER_BULK_SHIPMENT") {
+				docType = "BULK_STO"
+			}
+		}
+		doc.DocumentType = docType
 		userIdStr = &parts[1]
+	case "reports":
+		if len(parts) < 4 {
+			logger.Error("reports key missing expected indices", zap.String("key", key))
+			return nil
+		}
+		if parts[1] == "sales-performance" || parts[1] == "availability" || parts[1] == "soa" {
+			docType := parts[1]
+			sellerIdStr = &parts[2]
+			doc.DocumentType = documentTypeMap[docType]
+		}
+		if parts[1] == "movement_invoice" || parts[1] == "daily-ageing" {
+			docType := parts[1]
+			sellerIdStr = &parts[3]
+			doc.DocumentType = documentTypeMap[docType]
+		}
 	}
 
 	if userIdStr != nil {
-		userId, err := strconv.ParseInt(*userIdStr, 64, 10)
+		userId, err := strconv.ParseInt(*userIdStr, 10, 64)
 		if err != nil {
 			logger.Error("Failed to parse user ID", zap.String("userIdStr", *userIdStr), zap.Error(err))
 			return nil
@@ -150,7 +208,7 @@ func buildPayloadFromKey(key string) *Document {
 		doc.UserId = &userId
 	}
 	if sellerIdStr != nil {
-		sellerId, err := strconv.ParseInt(*sellerIdStr, 64, 10)
+		sellerId, err := strconv.ParseInt(*sellerIdStr, 10, 64)
 		if err != nil {
 			logger.Error("Failed to parse seller ID", zap.String("sellerIdStr", *sellerIdStr), zap.Error(err))
 			return nil
